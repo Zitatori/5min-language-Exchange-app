@@ -1,318 +1,240 @@
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
-import sqlite3
-from uuid import uuid4
-from datetime import datetime, timedelta
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
-DB_PATH = "five_min_talk.db"
-
+# --- FastAPI setup ---
 app = FastAPI()
 
-# ===== DB =====
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# --- Static folder for images ---
+app.mount("/image", StaticFiles(directory="image"), name="image")
 
-def init_db():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            role TEXT NOT NULL,
-            speak_langs TEXT,
-            learn_lang TEXT,
-            points INTEGER DEFAULT 5,
-            online INTEGER DEFAULT 0
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS blocked_pairs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id INTEGER NOT NULL,
-            teacher_id INTEGER NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            room_id TEXT NOT NULL,
-            student_id INTEGER NOT NULL,
-            teacher_id INTEGER NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT,
-            active INTEGER DEFAULT 1
-        )
-    """)
-    conn.commit()
-    conn.close()
+LANGUAGES = ["Japanese", "English", "Spanish", "French"]
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
-# ===== 共通 =====
-def get_current_user_id(request: Request):
-    user_id = request.cookies.get("user_id")
-    if not user_id:
-        return None
-    try:
-        return int(user_id)
-    except ValueError:
-        return None
+# =======================
+#   DASHBOARD
+# =======================
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(role: str = None):
+    languages_html = "".join(
+        [
+            f"""
+            <button onclick="selectLanguage('{lang}')"
+                class='px-4 py-2 rounded-xl border border-indigo-400 text-indigo-600
+                       hover:bg-indigo-50 active:scale-95 transition w-full mb-2'>
+                {lang}
+            </button>
+            """
+            for lang in LANGUAGES
+        ]
+    )
 
-def html_head(title="5min Talk"):
     return f"""
+    <!DOCTYPE html>
+    <html>
     <head>
-        <meta charset="UTF-8">
-        <title>{title}</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>5min Talk</title>
+        <script src="https://cdn.tailwindcss.com"></script>
     </head>
-    """
 
-# ===== ページ =====
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    user_id = get_current_user_id(request)
-    if user_id:
-        return RedirectResponse("/dashboard")
-    html = f"""
-    <html>
-    {html_head("5min Talk")}
-    <body class="bg-light">
-        <div class="container py-5">
-            <div class="card shadow p-4 mx-auto" style="max-width:600px;">
-                <h1 class="text-center mb-3 text-primary">🗣️ 5min Talk</h1>
-                <p class="text-center text-muted">
-                    5分だけビデオ通話で言語練習。<br>
-                    出会いなし・安心・ライト。
-                </p>
-                <div class="text-center mt-4">
-                    <a href="/register" class="btn btn-primary btn-lg">はじめる</a>
-                </div>
+    <body class="bg-gradient-to-b from-indigo-100 to-white min-h-screen flex items-center justify-center px-6">
+
+        <div class="bg-white shadow-xl rounded-3xl p-8 w-full max-w-sm text-center border border-indigo-50">
+
+            <h1 class="text-3xl font-bold text-indigo-600 mb-6">🗣️ 5min Talk</h1>
+
+            <div class="space-y-4">
+                <a href="/dashboard?role=student"
+                    class="block w-full bg-indigo-500 text-white py-3 rounded-xl hover:bg-indigo-600 active:scale-95 transition">
+                    🎓 I'm a Student
+                </a>
+
+                <a href="/dashboard?role=teacher"
+                    class="block w-full border border-indigo-500 text-indigo-500 py-3 rounded-xl hover:bg-indigo-50 active:scale-95 transition">
+                    👩‍🏫 I'm a Teacher
+                </a>
             </div>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
 
-@app.get("/register", response_class=HTMLResponse)
-async def register_form():
-    html = f"""
-    <html>
-    {html_head("登録")}
-    <body class="bg-light">
-        <div class="container py-5">
-            <div class="card shadow p-4 mx-auto" style="max-width:600px;">
-                <h2 class="text-center mb-4">ユーザー登録</h2>
-                <form action="/register" method="post" id="regForm">
-                    <div class="mb-3">
-                        <label class="form-label">名前</label>
-                        <input type="text" class="form-control" name="name" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">ロール</label>
-                        <select name="role" id="role" class="form-select" onchange="toggleLanguageSelectors()">
-                            <option value="student">生徒</option>
-                            <option value="teacher">先生</option>
-                        </select>
-                    </div>
-
-                    <!-- 先生用: 複数選択 -->
-                    <div id="teacherLangs" class="mb-3" style="display:none;">
-                        <label class="form-label">話せる言語（複数選択可）</label><br>
-                        <div class="btn-group w-100" role="group">
-                            <input type="checkbox" class="btn-check" id="teach_jp" name="speak_langs" value="ja">
-                            <label class="btn btn-outline-primary" for="teach_jp">🇯🇵 日本語</label>
-
-                            <input type="checkbox" class="btn-check" id="teach_en" name="speak_langs" value="en">
-                            <label class="btn btn-outline-primary" for="teach_en">🇬🇧 英語</label>
-
-                            <input type="checkbox" class="btn-check" id="teach_es" name="speak_langs" value="es">
-                            <label class="btn btn-outline-primary" for="teach_es">🇪🇸 スペイン語</label>
-
-                            <input type="checkbox" class="btn-check" id="teach_fr" name="speak_langs" value="fr">
-                            <label class="btn btn-outline-primary" for="teach_fr">🇫🇷 フランス語</label>
-                        </div>
-                    </div>
-
-                    <!-- 生徒用: 単一選択 -->
-                    <div id="studentLang" class="mb-3">
-                        <label class="form-label">学びたい言語</label><br>
-                        <div class="btn-group w-100" role="group">
-                            <input type="radio" class="btn-check" id="learn_jp" name="learn_lang" value="ja" required>
-                            <label class="btn btn-outline-success" for="learn_jp">🇯🇵 日本語</label>
-
-                            <input type="radio" class="btn-check" id="learn_en" name="learn_lang" value="en">
-                            <label class="btn btn-outline-success" for="learn_en">🇬🇧 英語</label>
-
-                            <input type="radio" class="btn-check" id="learn_es" name="learn_lang" value="es">
-                            <label class="btn btn-outline-success" for="learn_es">🇪🇸 スペイン語</label>
-
-                            <input type="radio" class="btn-check" id="learn_fr" name="learn_lang" value="fr">
-                            <label class="btn btn-outline-success" for="learn_fr">🇫🇷 フランス語</label>
-                        </div>
-                    </div>
-
-                    <div class="text-center mt-4">
-                        <button type="submit" class="btn btn-success btn-lg">登録</button>
-                    </div>
-                </form>
-            </div>
         </div>
 
         <script>
-        function toggleLanguageSelectors() {{
-            const role = document.getElementById('role').value;
-            document.getElementById('teacherLangs').style.display = role === 'teacher' ? 'block' : 'none';
-            document.getElementById('studentLang').style.display = role === 'student' ? 'block' : 'none';
+        const urlParams = new URLSearchParams(window.location.search);
+        const role = urlParams.get("role");
+
+        if (role === "student" || role === "teacher") {{
+            document.body.innerHTML = `
+            <div class='bg-white shadow-xl rounded-3xl p-8 w-full max-w-sm text-center border border-indigo-50 mt-6 mx-auto'>
+                <h2 class='text-2xl font-bold text-indigo-600 mb-1'>Choose Language</h2>
+                <p class='text-gray-500 mb-4 text-sm'>${{role === "student" ? "Pick 1 language" : "Choose all you can teach"}}</p>
+
+                <div id='langButtons' class='space-y-2'>
+                    {languages_html}
+                </div>
+
+                <button id='startBtn'
+                    onclick="goRoom()"
+                    class='mt-4 w-full bg-indigo-500 text-white py-3 rounded-xl opacity-50 cursor-not-allowed transition'>
+                    Start
+                </button>
+            </div>
+            `;
+
+            let selected = role === "student" ? null : [];
+
+            window.selectLanguage = function(lang) {{
+                if (role === "student") {{
+                    selected = lang;
+                    enableStart();
+                }} else {{
+                    if (selected.includes(lang)) {{
+                        selected = selected.filter(l => l !== lang);
+                    }} else {{
+                        selected.push(lang);
+                    }}
+                    enableStart();
+                }}
+            }}
+
+            function enableStart() {{
+                const btn = document.getElementById("startBtn");
+                const ok = role === "student" ? selected !== null : selected.length > 0;
+
+                if (ok) {{
+                    btn.classList.remove("opacity-50", "cursor-not-allowed");
+                }} else {{
+                    btn.classList.add("opacity-50", "cursor-not-allowed");
+                }}
+            }}
+
+            window.goRoom = function() {{
+                if (role === "student") {{
+                    window.location.href = `/room?role=student&lang=${{selected}}`;
+                }} else {{
+                    window.location.href = `/room?role=teacher&langs=${{selected.join(",")}}`;
+                }}
+            }}
         }}
         </script>
     </body>
     </html>
     """
-    return HTMLResponse(html)
 
-@app.post("/register")
-async def register(request: Request):
-    form = await request.form()
-    name = form.get("name")
-    role = form.get("role")
-    speak_langs = ",".join(form.getlist("speak_langs")) if role == "teacher" else ""
-    learn_lang = form.get("learn_lang", "")
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO users (name, role, speak_langs, learn_lang) VALUES (?, ?, ?, ?)",
-                (name, role, speak_langs.strip(), learn_lang.strip()))
-    user_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+# =======================
+#   ROOM PAGE
+# =======================
+@app.get("/room", response_class=HTMLResponse)
+async def room(role: str = "student", lang: str = None, langs: str = None):
 
-    resp = RedirectResponse("/dashboard", status_code=302)
-    resp.set_cookie("user_id", str(user_id))
-    return resp
+    lang_display = lang if role == "student" else langs.replace(",", ", ")
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    user_id = get_current_user_id(request)
-    if not user_id:
-        return RedirectResponse("/")
-
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    user = cur.fetchone()
-    conn.close()
-
-    if not user:
-        resp = RedirectResponse("/register", status_code=302)
-        resp.delete_cookie("user_id")
-        return resp
-
-    if user["role"] == "teacher":
-        body = f"""
-        <h2 class="text-center mb-3 text-primary">先生ダッシュボード</h2>
-        <p class="text-center">ようこそ <b>{user['name']}</b> さん</p>
-        <p class="text-center text-muted">話せる言語: {user['speak_langs']}</p>
-        <div class="text-center">
-            <a href="/room/{uuid4().hex}?as=teacher" class="btn btn-success btn-lg mt-3">ルームを開く（仮）</a>
-        </div>
-        """
-    else:
-        body = f"""
-        <h2 class="text-center mb-3 text-primary">生徒ダッシュボード</h2>
-        <p class="text-center">こんにちは <b>{user['name']}</b> さん</p>
-        <p class="text-center text-muted">学びたい言語: {user['learn_lang'] or '(未設定)'} / 残ポイント: {user['points']}</p>
-        <div class="text-center">
-            <a href="/room/{uuid4().hex}?as=student" class="btn btn-primary btn-lg mt-3">5分トークを開始</a>
-        </div>
-        """
-
-    html = f"""
+    return f"""
+    <!DOCTYPE html>
     <html>
-    {html_head("Dashboard")}
-    <body class="bg-light">
-        <div class="container py-5">
-            <div class="card shadow p-4 mx-auto" style="max-width:600px;">
-                {body}
-                <div class="text-center mt-4">
-                    <a href="/logout" class="btn btn-outline-danger">ログアウト</a>
-                </div>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>5min Talk Room</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+
+    <body class="bg-gradient-to-b from-white to-indigo-100 min-h-screen px-4 py-6">
+
+        <div class="max-w-md mx-auto bg-white/80 backdrop-blur-md border border-indigo-100
+                    shadow-xl rounded-3xl p-6 mt-4">
+
+            <h2 class="text-xl font-bold text-indigo-600 text-center mb-1">5-Minute Session</h2>
+            <p class="text-center text-gray-500 text-sm mb-1">Role: <b>{role}</b></p>
+            <p class="text-center text-gray-600 text-sm mb-3">Language: <b>{lang_display}</b></p>
+
+            <!-- VIDEO AREA -->
+            <div class="relative w-full h-64 rounded-2xl overflow-hidden shadow-inner mb-4 bg-black">
+
+                <!-- 相手のダミー画像 -->
+                <img src="/image/partner_dummy.png"
+                     id="remotePlaceholder"
+                     class="absolute inset-0 w-full h-full object-cover opacity-90">
+
+                <!-- 相手の映像（WebRTC用） -->
+                <video id="remoteVideo"
+                       class="absolute inset-0 w-full h-full object-cover hidden"
+                       autoplay playsinline>
+                </video>
+
+                <!-- 自分の映像（右下小） -->
+                <video id="localVideo"
+                       class="absolute bottom-3 right-3 w-28 h-20 object-cover rounded-xl border-2 border-white shadow-lg"
+                       autoplay muted playsinline>
+                </video>
             </div>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
 
-@app.get("/logout")
-async def logout():
-    resp = RedirectResponse("/", status_code=302)
-    resp.delete_cookie("user_id")
-    return resp
+            <div id="timer" class="text-4xl font-bold text-center text-red-500 mb-4">05:00</div>
 
-@app.get("/room/{room_id}", response_class=HTMLResponse)
-async def room_page(request: Request, room_id: str):
-    role = request.query_params.get("as", "student")
-    html = f"""
-    <html>
-    {html_head("5分トークルーム")}
-    <body class="bg-light">
-        <div class="container py-5">
-            <div class="card shadow-lg p-4 mx-auto" style="max-width:800px;">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="text-primary mb-0">🗣️ 5分トークルーム</h3>
-                    <span class="badge bg-secondary text-uppercase">{role}</span>
-                </div>
+            <div class="flex justify-center gap-4 mb-6">
+                <button id="toggleCam"
+                    class="px-4 py-2 bg-indigo-500 text-white rounded-xl shadow hover:bg-indigo-600 transition active:scale-95">
+                    📷 Camera Off
+                </button>
 
-                <div class="row">
-                    <div class="col-md-6 text-center">
-                        <div class="border rounded bg-dark text-white d-flex align-items-center justify-content-center" style="height:240px;">
-                            <span class="text-muted">あなたのカメラ（仮）</span>
-                        </div>
-                    </div>
-                    <div class="col-md-6 text-center">
-                        <div class="border rounded bg-dark text-white d-flex align-items-center justify-content-center" style="height:240px;">
-                            <span class="text-muted">相手の映像（仮）</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="text-center mt-4">
-                    <h5 class="mb-3">⏱️ 残り時間</h5>
-                    <div id="timer" class="display-5 fw-bold text-danger">05:00</div>
-                    <button class="btn btn-danger btn-lg mt-4" onclick="leaveRoom()">退出</button>
-                </div>
+                <button onclick="window.location.href='/dashboard'"
+                    class="px-4 py-2 border border-red-500 text-red-500 rounded-xl hover:bg-red-50 transition active:scale-95">
+                    Leave
+                </button>
             </div>
         </div>
 
         <script>
+        // ====== CAMERA ======
+        let localStream;
+        const localVideo = document.getElementById("localVideo");
+
+        async function startCamera() {{
+            try {{
+                localStream = await navigator.mediaDevices.getUserMedia({{ video: true }});
+                localVideo.srcObject = localStream;
+            }} catch (err) {{
+                alert("Camera access denied.");
+            }}
+        }}
+        startCamera();
+
+        // ====== CAMERA TOGGLE ======
+        const camBtn = document.getElementById("toggleCam");
+        camBtn.addEventListener("click", () => {{
+            const track = localStream.getVideoTracks()[0];
+            track.enabled = !track.enabled;
+            camBtn.textContent = track.enabled ? "📷 Camera Off" : "📷 Camera On";
+        }});
+
+        // ====== TIMER ======
         let remaining = 5 * 60;
         const timerEl = document.getElementById("timer");
+
         const countdown = setInterval(() => {{
-            remaining -= 1;
+            remaining--;
+
             if (remaining <= 0) {{
                 clearInterval(countdown);
-                timerEl.textContent = "終了";
-                timerEl.classList.remove("text-danger");
-                timerEl.classList.add("text-muted");
+                timerEl.textContent = "Time's up!";
+                timerEl.classList.add("text-gray-500");
+
+                setTimeout(() => {{ window.location.href="/dashboard"; }}, 1500);
             }} else {{
                 const m = String(Math.floor(remaining / 60)).padStart(2, '0');
                 const s = String(remaining % 60).padStart(2, '0');
                 timerEl.textContent = `${{m}}:${{s}}`;
             }}
         }}, 1000);
-
-        function leaveRoom() {{
-            window.location.href = '/dashboard';
-        }}
         </script>
+
     </body>
     </html>
     """
-    return HTMLResponse(html)
+
+
+# =======================
+#   ROOT REDIRECT
+# =======================
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return """<meta http-equiv="refresh" content="0; URL=/dashboard" />"""
