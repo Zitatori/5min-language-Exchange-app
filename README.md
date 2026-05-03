@@ -2,6 +2,12 @@
 **Minimal Language Speaking Platform / 言語練習のためのミニマルな会話プラットフォーム**
 
 ---
+## About this repository
+
+This repository is an early FastAPI prototype created during initial experimentation.
+
+本リポジトリは、初期の試行錯誤の中で作成した FastAPI のプロトタイプです。
+当初は Streamlit だと思っていましたが、確認したところ FastAPI ベースの実装でした。
 
 ## 🌱 Overview / 概要
 
